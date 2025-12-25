@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P2P高清屏幕共享</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>P2P高清屏幕共享</h1>
+        <p class="subtitle">1080p@60fps + 音频支持</p>
+
+        <div class="controls">
+            <input type="text" id="roomId" placeholder="输入房间号">
+            <button id="joinBtn">加入房间</button>
+            <select id="resolutionSelect">
+                <option value="1920x1080">1080p (1920x1080)</option>
+                <option value="2560x1440">2K (2560x1440)</option>
+                <option value="3840x2160">4K (3840x2160)</option>
+            </select>
+            <select id="fpsSelect">
+                <option value="30">30fps</option>
+                <option value="60" selected>60fps</option>
+            </select>
+            <button id="shareBtn" disabled>开始共享屏幕</button>
+            <button id="stopBtn" disabled>停止共享</button>
+        </div>
+
+        <div class="status">
+            <p>状态: <span id="status">未连接</span></p>
+            <p>房间: <span id="currentRoom">-</span></p>
+            <p class="info">💡 提示: 共享时请勾选"共享音频"以传输系统声音</p>
+        </div>
+
+        <div class="videos">
+            <div class="video-section">
+                <p class="video-label">本地屏幕</p>
+                <div class="video-container">
+                    <div class="loading" id="localLoading">
+                        <div class="spinner"></div>
+                        <p>等待屏幕共享...</p>
+                    </div>
+                    <video id="localVideo" autoplay muted></video>
+                </div>
+            </div>
+            <div class="video-section">
+                <p class="video-label">远程屏幕</p>
+                <div class="video-container" id="remoteContainer">
+                    <div class="loading" id="remoteLoading">
+                        <div class="spinner"></div>
+                        <p>等待远程连接...</p>
+                    </div>
+                    <video id="remoteVideo" autoplay></video>
+                    <div class="video-controls" id="videoControls">
+                        <button id="fullscreenBtn" class="control-btn" title="全屏">🖥️</button>
+                        <button id="webFullscreenBtn" class="control-btn" title="网页全屏">⛶</button>
+                        <button id="muteBtn" class="control-btn" title="静音">🔊</button>
+                        <input type="range" id="volumeSlider" min="0" max="100" value="100" title="音量调节">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="client.js"></script>
+</body>
+</html>
