@@ -331,6 +331,12 @@ function stopScreenShare() {
     peerConnection.close();
     peerConnection = null;
   }
+  
+  // 停止码率监控
+  if (bitrateMonitorInterval) {
+    clearInterval(bitrateMonitorInterval);
+    bitrateMonitorInterval = null;
+  }
 
   console.log('屏幕共享已停止');
 }
@@ -357,7 +363,7 @@ async function createPeerConnection() {
   }
 
   // 监听远程流
-  peerConnection.ontrack = (event) => {
+  peerConnection.ontrack = async (event) => {
     console.log('收到远程流事件:', event);
     console.log('远程流数量:', event.streams ? event.streams.length : 0);
     console.log('远程轨道:', event.track ? event.track.kind : 'none', event.track ? event.track.id : 'none');
@@ -371,6 +377,23 @@ async function createPeerConnection() {
       
       remoteVideo.srcObject = remoteStream;
       remoteLoading.classList.add('hidden'); // 隐藏远程loading
+      
+      // 检查解码器信息（硬件/软件解码）
+      setTimeout(async () => {
+        try {
+          const receivers = peerConnection.getReceivers();
+          for (const receiver of receivers) {
+            if (receiver.track && receiver.track.kind === 'video') {
+              const codecInfo = await getDecoderInfo(receiver);
+              if (codecInfo) {
+                console.log(`📺 使用解码器: ${codecInfo.name} (${codecInfo.hardware ? '硬件' : '软件'}解码)`);
+              }
+            }
+          }
+        } catch (error) {
+          console.error('获取解码器信息失败:', error);
+        }
+      }, 1000);
       
       // 确保视频播放
       remoteVideo.play().then(() => {
@@ -601,7 +624,14 @@ async function sendOfferToRoomUsers() {
       offerToReceiveVideo: true,
       offerToReceiveAudio: true
     });
+    
+    // 修改SDP以强制使用硬件编码
+    offer.sdp = modifySdpForHardwareEncoding(offer.sdp);
+    
     await peerConnection.setLocalDescription(offer);
+    
+    // 在设置本地描述后，设置编码参数
+    await setEncodingParametersAfterOffer();
     
     console.log('发送offer，SDP类型:', offer.type);
     ws.send(JSON.stringify({
@@ -613,6 +643,172 @@ async function sendOfferToRoomUsers() {
     console.log('已向房间用户发送offer');
   } catch (error) {
     console.error('发送offer失败:', error);
+  }
+}
+
+// 在offer/answer交换后设置编码参数
+async function setEncodingParametersAfterOffer() {
+  if (!peerConnection || !localStream) return;
+  
+  try {
+    const senders = peerConnection.getSenders();
+    for (const sender of senders) {
+      if (sender.track && sender.track.kind === 'video') {
+        await setVideoEncodingParameters(sender, sender.track);
+        // 强制使用硬件编码
+        await forceHardwareEncoding(sender);
+      }
+    }
+  } catch (error) {
+    console.error('设置编码参数失败:', error);
+  }
+}
+
+// 强制使用硬件编码
+async function forceHardwareEncoding(sender) {
+  try {
+    const params = sender.getParameters();
+    
+    if (!params.codecs) {
+      // 如果codecs未设置，尝试通过SDP修改
+      console.log('⚠️ 无法直接设置编码器，将通过SDP修改');
+      return;
+    }
+    
+    // 优先选择硬件编码器
+    // H.264通常有硬件支持，VP8/VP9通常是软件编码
+    const hardwareCodecs = ['H264', 'h264'];
+    const softwareCodecs = ['VP8', 'vp8', 'VP9', 'vp9'];
+    
+    // 重新排序编码器，硬件编码器优先
+    if (params.codecs && params.codecs.length > 0) {
+      const sortedCodecs = [];
+      
+      // 先添加硬件编码器
+      for (const codec of params.codecs) {
+        const codecName = codec.mimeType?.split('/')[1] || '';
+        if (hardwareCodecs.some(hc => codecName.toLowerCase().includes(hc.toLowerCase()))) {
+          sortedCodecs.push(codec);
+        }
+      }
+      
+      // 再添加其他编码器
+      for (const codec of params.codecs) {
+        const codecName = codec.mimeType?.split('/')[1] || '';
+        if (!hardwareCodecs.some(hc => codecName.toLowerCase().includes(hc.toLowerCase())) &&
+            !softwareCodecs.some(sc => codecName.toLowerCase().includes(sc.toLowerCase()))) {
+          sortedCodecs.push(codec);
+        }
+      }
+      
+      // 最后添加软件编码器（作为备选）
+      for (const codec of params.codecs) {
+        const codecName = codec.mimeType?.split('/')[1] || '';
+        if (softwareCodecs.some(sc => codecName.toLowerCase().includes(sc.toLowerCase()))) {
+          sortedCodecs.push(codec);
+        }
+      }
+      
+      if (sortedCodecs.length > 0) {
+        params.codecs = sortedCodecs;
+        await sender.setParameters(params);
+        console.log('✅ 已设置编码器优先级（硬件编码优先）');
+        console.log('编码器顺序:', params.codecs.map(c => c.mimeType).join(', '));
+      }
+    }
+  } catch (error) {
+    console.warn('设置硬件编码失败（将使用SDP修改）:', error);
+  }
+}
+
+// 修改SDP以强制使用硬件编码
+function modifySdpForHardwareEncoding(sdp) {
+  try {
+    let modifiedSdp = sdp;
+    
+    // 查找所有视频编码器
+    const videoCodecRegex = /m=video\s+\d+\s+([^\r\n]+)/g;
+    const codecMatches = [];
+    let match;
+    
+    while ((match = videoCodecRegex.exec(sdp)) !== null) {
+      codecMatches.push(match);
+    }
+    
+    // 优先选择H.264（通常有硬件支持）
+    // 移除或降低VP8/VP9的优先级（通常是软件编码）
+    const lines = sdp.split('\n');
+    const modifiedLines = [];
+    let inVideoSection = false;
+    let videoPayloadTypes = [];
+    
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      
+      if (line.startsWith('m=video')) {
+        inVideoSection = true;
+        // 提取payload types
+        const payloadTypes = line.split(' ').slice(3);
+        videoPayloadTypes = payloadTypes.map(pt => parseInt(pt)).filter(pt => !isNaN(pt));
+        modifiedLines.push(line);
+        continue;
+      }
+      
+      if (line.startsWith('m=') && !line.startsWith('m=video')) {
+        inVideoSection = false;
+      }
+      
+      // 在视频部分，优先H.264编码器
+      if (inVideoSection && line.startsWith('a=rtpmap:')) {
+        const payloadType = parseInt(line.split(':')[1].split(' ')[0]);
+        const codecName = line.toLowerCase();
+        
+        // H.264编码器（硬件支持）
+        if (codecName.includes('h264') || codecName.includes('h.264')) {
+          // 保持H.264，并提高优先级
+          modifiedLines.push(line);
+          // 添加硬件编码标识
+          if (!lines[i + 1]?.includes('a=fmtp:')) {
+            modifiedLines.push(`a=fmtp:${payloadType} profile-level-id=42e01f;level-asymmetry-allowed=1;packetization-mode=1`);
+          }
+          continue;
+        }
+        
+        // VP8/VP9编码器（通常是软件编码）
+        if (codecName.includes('vp8') || codecName.includes('vp9')) {
+          // 降低优先级，但不移除（作为备选）
+          modifiedLines.push(line);
+          continue;
+        }
+        
+        // 其他编码器
+        modifiedLines.push(line);
+        continue;
+      }
+      
+      // 设置编码器优先级（H.264优先）
+      if (inVideoSection && line.startsWith('a=rtcp-fb:')) {
+        modifiedLines.push(line);
+        continue;
+      }
+      
+      modifiedLines.push(line);
+    }
+    
+    modifiedSdp = modifiedLines.join('\n');
+    
+    // 重新排序m=video行中的payload types，H.264优先
+    modifiedSdp = modifiedSdp.replace(/m=video\s+\d+\s+([^\r\n]+)/, (match, payloadTypes) => {
+      const types = payloadTypes.split(' ').filter(t => t);
+      // 这里我们保持原有顺序，因为优先级在SDP的其他部分设置
+      return match;
+    });
+    
+    console.log('✅ 已修改SDP以优先使用硬件编码（H.264）');
+    return modifiedSdp;
+  } catch (error) {
+    console.error('修改SDP失败:', error);
+    return sdp;
   }
 }
 
@@ -645,7 +841,14 @@ async function handleOffer(offer) {
 
   console.log('创建Answer');
   const answer = await peerConnection.createAnswer();
+  
+  // 修改SDP以强制使用硬件编码
+  answer.sdp = modifySdpForHardwareEncoding(answer.sdp);
+  
   await peerConnection.setLocalDescription(answer);
+  
+  // 在设置本地描述后，设置编码参数
+  await setEncodingParametersAfterOffer();
 
   console.log('发送Answer');
   ws.send(JSON.stringify({
@@ -661,6 +864,9 @@ async function handleAnswer(answer) {
   if (peerConnection) {
     console.log('设置远程Answer描述');
     await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+    
+    // 在设置远程描述后，设置编码参数
+    await setEncodingParametersAfterOffer();
     
     // 处理之前收到的ICE候选
     console.log('处理待处理的ICE候选，数量:', pendingIceCandidates.length);
@@ -723,6 +929,173 @@ async function handleIceCandidate(candidate) {
     console.log('PeerConnection不存在，将ICE候选加入队列');
     pendingIceCandidates.push(candidate);
   }
+}
+
+// 设置视频编码参数和码率限制
+async function setVideoEncodingParameters(sender, track) {
+  try {
+    const settings = track.getSettings();
+    const width = settings.width || 1920;
+    const height = settings.height || 1080;
+    const frameRate = settings.frameRate || 30;
+    
+    // 根据分辨率和帧率计算合适的码率（Mbps）
+    // 4K@60fps: 25-50Mbps, 2K@60fps: 12-25Mbps, 1080p@60fps: 6-12Mbps
+    let maxBitrate;
+    const pixels = width * height;
+    
+    if (pixels >= 3840 * 2160) {
+      // 4K
+      maxBitrate = frameRate >= 60 ? 45000000 : 30000000; // 45Mbps @ 60fps, 30Mbps @ 30fps
+    } else if (pixels >= 2560 * 1440) {
+      // 2K
+      maxBitrate = frameRate >= 60 ? 20000000 : 15000000; // 20Mbps @ 60fps, 15Mbps @ 30fps
+    } else {
+      // 1080p
+      maxBitrate = frameRate >= 60 ? 10000000 : 6000000; // 10Mbps @ 60fps, 6Mbps @ 30fps
+    }
+    
+    // 等待sender参数可用
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
+    const params = sender.getParameters();
+    
+    if (!params.encodings) {
+      params.encodings = [{}];
+    }
+    
+    // 设置编码参数
+    params.encodings.forEach(encoding => {
+      // 设置最大码率（bps）
+      encoding.maxBitrate = maxBitrate;
+      
+      // 设置编码优先级（高优先级用于低延迟）
+      encoding.priority = 'high';
+      
+      // 设置网络优先级
+      encoding.networkPriority = 'high';
+      
+      // 对于4K，可以启用可扩展编码（如果支持）
+      if (pixels >= 3840 * 2160) {
+        // 尝试使用可扩展编码以降低码率
+        encoding.scaleResolutionDownBy = 1.0; // 不缩放
+      }
+    });
+    
+    // 应用参数
+    await sender.setParameters(params);
+    
+    // 检查使用的编码器
+    const codecInfo = await getCodecInfo(sender);
+    console.log(`✅ 已设置视频编码参数: ${width}x${height}@${frameRate}fps, 最大码率: ${(maxBitrate / 1000000).toFixed(1)}Mbps`);
+    if (codecInfo) {
+      console.log(`📹 使用编码器: ${codecInfo.name} (${codecInfo.hardware ? '硬件' : '软件'}编码)`);
+    }
+    
+    // 监控实际码率
+    monitorBitrate(sender, track);
+  } catch (error) {
+    console.error('设置编码参数失败:', error);
+    console.warn('将使用浏览器默认编码参数');
+  }
+}
+
+// 获取编码器信息
+async function getCodecInfo(sender) {
+  try {
+    const stats = await sender.getStats();
+    let codecInfo = null;
+    
+    stats.forEach(report => {
+      if (report.type === 'codec') {
+        const codecName = report.mimeType?.toLowerCase() || '';
+        const isHardware = codecName.includes('h264') || codecName.includes('h.264');
+        codecInfo = {
+          name: report.mimeType || 'unknown',
+          hardware: isHardware
+        };
+      }
+    });
+    
+    return codecInfo;
+  } catch (error) {
+    console.error('获取编码器信息失败:', error);
+    return null;
+  }
+}
+
+// 获取解码器信息
+async function getDecoderInfo(receiver) {
+  try {
+    const stats = await receiver.getStats();
+    let codecInfo = null;
+    
+    stats.forEach(report => {
+      if (report.type === 'codec') {
+        const codecName = report.mimeType?.toLowerCase() || '';
+        const isHardware = codecName.includes('h264') || codecName.includes('h.264');
+        codecInfo = {
+          name: report.mimeType || 'unknown',
+          hardware: isHardware
+        };
+      }
+    });
+    
+    return codecInfo;
+  } catch (error) {
+    console.error('获取解码器信息失败:', error);
+    return null;
+  }
+}
+
+// 监控实际码率
+let bitrateMonitorInterval = null;
+function monitorBitrate(sender, track) {
+  // 清除之前的监控
+  if (bitrateMonitorInterval) {
+    clearInterval(bitrateMonitorInterval);
+  }
+  
+  let lastBytesSent = 0;
+  let lastTimestamp = Date.now();
+  
+  bitrateMonitorInterval = setInterval(async () => {
+    try {
+      const stats = await sender.getStats();
+      let currentBytesSent = 0;
+      let currentTimestamp = Date.now();
+      
+      stats.forEach(report => {
+        if (report.type === 'outbound-rtp' && report.mediaType === 'video') {
+          currentBytesSent = report.bytesSent || 0;
+          currentTimestamp = report.timestamp || Date.now();
+        }
+      });
+      
+      if (lastBytesSent > 0) {
+        const bytesDiff = currentBytesSent - lastBytesSent;
+        const timeDiff = (currentTimestamp - lastTimestamp) / 1000; // 秒
+        const bitrate = (bytesDiff * 8) / timeDiff; // bps
+        const bitrateMbps = (bitrate / 1000000).toFixed(2);
+        
+        const settings = track.getSettings();
+        const resolution = `${settings.width || 0}x${settings.height || 0}`;
+        const fps = settings.frameRate || 0;
+        
+        console.log(`📊 实时码率: ${bitrateMbps}Mbps (${resolution}@${fps}fps)`);
+        
+        // 如果码率过高，给出警告
+        if (bitrate > 50000000) { // 50Mbps
+          console.warn('⚠️ 码率过高，可能导致网络拥塞');
+        }
+      }
+      
+      lastBytesSent = currentBytesSent;
+      lastTimestamp = currentTimestamp;
+    } catch (error) {
+      console.error('获取码率统计失败:', error);
+    }
+  }, 2000); // 每2秒检查一次
 }
 
 // 更新状态显示

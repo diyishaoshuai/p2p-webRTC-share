@@ -56,7 +56,13 @@
       "Bash(ssh -i \"$env:USERPROFILE\\\\.ssh\\\\id_rsa\" -o StrictHostKeyChecking=no root@120.26.41.79 \"head -30 /var/www/webrtc-share/public/client.js\")",
       "Bash(git init:*)",
       "Bash(git config:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git remote add:*)",
+      "Bash(git branch:*)",
+      "Bash(git push:*)",
+      "Bash(test:*)",
+      "Bash(git remote set-url:*)"
     ]
   }
 }
