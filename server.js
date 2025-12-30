@@ -35,23 +35,23 @@ function generateTurnCredentials() {
   };
 }
 
-// API: 获取ICE服务器配置（包含动态TURN凭证）
+// API: 获取ICE服务器配置
 app.get('/api/ice-servers', (req, res) => {
-  const turnCreds = generateTurnCredentials();
-
   res.json({
     iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
+      // 使用阿里云STUN服务器（国内可访问）
+      { urls: 'stun:stun.miwifi.com' },
+      { urls: 'stun:stun.chat.bilibili.com' },
+      // 自建TURN服务器
       {
-        urls: `turn:${TURN_SERVER}`,
-        username: turnCreds.username,
-        credential: turnCreds.credential
+        urls: 'turn:120.26.41.79:3478',
+        username: 'webrtc',
+        credential: 'webrtc123456'
       },
       {
-        urls: `turn:${TURN_SERVER}?transport=tcp`,
-        username: turnCreds.username,
-        credential: turnCreds.credential
+        urls: 'turn:120.26.41.79:3478?transport=tcp',
+        username: 'webrtc',
+        credential: 'webrtc123456'
       }
     ]
   });
