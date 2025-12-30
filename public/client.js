@@ -203,13 +203,6 @@ async function handleSignalingMessage(event) {
 // 开始屏幕共享
 async function startScreenShare() {
   try {
-    // 检查浏览器是否支持屏幕共享
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-      alert('您的浏览器不支持屏幕共享功能，请使用Chrome、Edge或Firefox浏览器');
-      return;
-    }
-
-    // 获取用户选择的分辨率和帧率
     const resolution = resolutionSelect.value.split('x');
     const width = parseInt(resolution[0]);
     const height = parseInt(resolution[1]);
@@ -217,15 +210,53 @@ async function startScreenShare() {
 
     console.log(`请求屏幕共享: ${width}x${height}@${fps}fps`);
 
-    // 请求屏幕共享权限，使用用户选择的参数
-    localStream = await navigator.mediaDevices.getDisplayMedia({
-      video: {
-        width: { ideal: width },
-        height: { ideal: height },
-        frameRate: { ideal: fps }
-      },
-      audio: true
-    });
+    // 检测是否在Electron环境中
+    const isElectron = typeof window !== 'undefined' && window.process && window.process.type === 'renderer';
+
+    if (isElectron && window.require) {
+      // Electron环境：使用desktopCapturer
+      const { ipcRenderer } = window.require('electron');
+      const sources = await ipcRenderer.invoke('get-sources');
+
+      if (!sources || sources.length === 0) {
+        alert('未找到可共享的屏幕');
+        return;
+      }
+
+      const primarySource = sources[0];
+      console.log('Electron: 选择屏幕源:', primarySource.name);
+
+      localStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          mandatory: {
+            chromeMediaSource: 'desktop',
+            chromeMediaSourceId: primarySource.id,
+            minWidth: width,
+            maxWidth: width,
+            minHeight: height,
+            maxHeight: height,
+            minFrameRate: fps,
+            maxFrameRate: fps
+          }
+        }
+      });
+    } else {
+      // 浏览器环境：使用getDisplayMedia
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        alert('您的浏览器不支持屏幕共享功能，请使用Chrome、Edge或Firefox浏览器');
+        return;
+      }
+
+      localStream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          width: { ideal: width },
+          height: { ideal: height },
+          frameRate: { ideal: fps }
+        },
+        audio: true
+      });
+    }
 
     localVideo.srcObject = localStream;
     localLoading.classList.add('hidden'); // 隐藏本地loading
